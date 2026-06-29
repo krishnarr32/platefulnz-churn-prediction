@@ -1,0 +1,871 @@
+---
+title: "Winning Back The Plate: Predicting And Preventing Churn At PlatefulNZ"
+author: "GROUP 24,SAI KRISHNA SUDARSAN (515172241),SARTHAK DHINGRA (24027665), ANCHAL ANCHAL (288115334),SHUBHAM SHUBHAM (472904966),ARJUN ARJUN (696499867)"
+format: 
+  pdf: 
+    geometry:
+      - top=14mm
+      - left=15mm
+      - right=15mm
+      - bottom=12mm
+      - heightrounded
+    colorlinks: true
+    papersize: a4
+    fontsize: 11pt
+    mainfont: Times New Roman
+    sansfont: Times New Roman
+    align: justify
+    include-in-header:
+      text: |
+        \usepackage{titling}
+        \usepackage{tikz}
+        \usetikzlibrary{calc}
+        \usepackage{tikzpagenodes}
+        \usepackage{atbegshi}
+        \usepackage{setspace}
+        \onehalfspacing
+        % Adjusting title position and font size
+        \pretitle{%
+          \begin{center}
+          \vspace*{-2cm}
+          \fontsize{14pt}{16pt}\selectfont\bfseries
+        }
+        \posttitle{\par\end{center}\vspace*{-0.75cm}}
+        % Adjusting author position and font size
+        \preauthor{%
+          \begin{center}
+          \fontsize{11pt}{13pt}\selectfont
+        }
+        \postauthor{\end{center}\vspace*{-2.25cm}}
+        % Page border
+        \AtBeginShipout{\AtBeginShipoutAddToBox{%
+          \begin{tikzpicture}[remember picture,overlay]
+            \draw[line width=0.5pt]
+              ($(current page.north west)+(1cm,-1cm)$) rectangle
+              ($(current page.south east)+(-1cm,1cm)$);
+          \end{tikzpicture}%
+        }}
+editor:
+  markdown:
+    wrap: 72
+editor_options:
+  chunk_output_type:inline
+execute:
+  warning: false
+  message: false
+  echo: false
+---
+
+```{r, echo= FALSE,include=FALSE, warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(
+  fig.path = "figures/",  # simple folder in same directory as QMD
+  dev = "png"
+)
+dir.create("figures", showWarnings = FALSE)  # creates folder if missing
+
+```
+
+```{r, echo= FALSE,include=FALSE, warning=FALSE, message=FALSE}
+# Install & load packages
+install_packages <- TRUE
+packages_needed <- c("tidymodels", "themis", "kknn", "rpart", "rpart.plot",
+                     "baguette", "discrim", "klaR", "ranger", "xgboost",
+                     "lightgbm", "bonsai", "nnet", "NeuralNetTools", "keras",
+                     "parallel", "future", "kernlab", "car", "corrplot", 
+                     "GGally", "vip", "dplyr", "readr", "skimr",    "finetune","kableExtra","knitr")
+
+packages_to_install <- packages_needed[!packages_needed %in% installed.packages()]
+if(install_packages){sapply(packages_to_install, install.packages, dependencies=TRUE, repos="https://cloud.r-project.org")}
+sapply(packages_needed, require, character=TRUE)
+tidymodels_prefer()
+
+# Parallel processing
+cores <- parallel::detectCores(logical = TRUE)
+plan(sequential)
+plan(multisession)
+
+```
+
+# Introduction
+
+The award-winning chef Sage Cooke founded PlatefulNZ, a subscription
+meal kit company serving all of New Zealand. The company faces rising
+customer attrition and uncertainty about churn drivers. This report
+analyses the dataset to identify churn predictors and provide actionable
+recommendations for improving retention and business growth.
+
+**Data Overview**
+
+The dataset contains 200,000 customer records and 26 variables covering
+demographics, engagement, subscription details, and retention outcomes.A
+user_ID uniquely identifies each customer, and retained_binary is the
+primary target variable (1 = retained, 0 = churned). This dataset is
+highly relevant for churn prediction because, on average, 76.8% of
+customers were retained while 23.2% churned from Table 1. While
+subscription details (plan type, weekly meals, and size) capture
+lifestyle preferences,(from figure 1 and 2 )we can see that demographic
+features like age (ranging from 17 to 91, averaging 42 years), gender,
+and location provide insights into customer segments. Email open rates
+(74%), app and website visits, and social media activity with low
+overall interaction measure behavioural engagement. Purchase behaviour
+and loyalty patterns are reflected in transactional details, such as the
+number of purchases, weeks since the last purchase, add-on purchase
+value, and discount usage. Additional customer experience indicators
+include support interactions, payment problems (5.4%), and satisfaction
+survey results. Due to its extensive coverage of behavioural,
+demographic, and transactional factors, this dataset offers a solid
+basis for modelling customer attrition and creating practical retention
+plans for PlatefulNZ.We started cleaning the dataset with base were week
+since last sign up.
+
+To better capture consumer behaviour, we developed new features in
+addition to raw variables. Likes, shares, posts, and comments were
+combined to create a weighted social media score representing each
+customer's online engagement degree. Building on this, we created an
+engagement band that blends the social media score with other important
+activity metrics, such as the quantity of purchases, app and website
+visits, and email responsiveness we can see that in figure 3. Using this
+composite metric, we could categorise customers into various engagement
+levels, which made it simpler to spot trends in loyalty and churn risk.
+These changes improved the dataset's capacity for prediction and offered
+a more comprehensive perspective on consumer interaction.
+
+```{r, include=FALSE, warning=FALSE, message=FALSE}
+# SETTING SEED
+set.seed(123)
+# Load data AND VIEW THE DATA SUMMARY
+data <- read.csv("platefulnz_customers.csv")
+
+# checking for any missing values 
+colSums(is.na(data))
+
+# to view the data
+glimpse(data)
+summary(data)
+```
+
+```{r,include=FALSE, warning=FALSE, message=FALSE}
+# CLEAN & PREP DATA
+#  transform categorical variables  and logical variable as factor
+ # Parse numeric fields
+data_reduced <- data %>%
+  mutate(across(where(is.character), as.factor),
+         across(where(is.logical), as.factor),
+         avg_AddOnpurchase_value =parse_number(as.character(avg_AddOnpurchase_value)),
+        weeks_since_signup = parse_number(as.character(weeks_since_signup)),
+        weeks_since_last_purchase = parse_number(as.character(weeks_since_last_purchase)),
+
+ # Social media score + band
+    social_media_score = (1*social_media_likes +
+                         2*social_media_comments +
+                         3*social_media_shares +
+                         4*social_media_posts),
+    sm_score_band = cut(
+      social_media_score,
+      breaks = c(-Inf, 1, 3, 6, Inf),
+      labels = c("Low","Medium","High","Very High"),
+      right = TRUE
+    )
+  ) %>%
+  # Drop IDs & redundant social columns
+  select(
+    -user_ID, -last_login_device, -last_browser,
+    -social_media_comments, -social_media_posts,
+    -social_media_likes, -social_media_shares,
+    -gender)
+
+
+# Convert target to factor
+data_reduced <- data_reduced |>
+  mutate(retained_binary = factor(retained_binary, labels = c("Churned", "Retained")))%>%
+
+# finally drop negatives (choose A or B as above)
+  filter(weeks_since_last_purchase >= 0 | is.na(weeks_since_last_purchase))
+
+# creating engagement score based on use 
+data_reduced <- data_reduced %>%
+  mutate(
+    engagement_score =
+      (app_visits * 3) +                    # heavier weight
+      (website_visits * 2) +                 # medium weight
+      (as.numeric(opened_last_email) * 5) +  # high weight for opening emails
+      (social_media_score * 1.5) +           # your existing SM score
+      (num_purchases * 4)                    # past purchases show strong engagement
+  )
+
+data_reduced <- data_reduced %>%
+  mutate(
+    engagement_band = cut(
+      engagement_score,
+      breaks = c(-Inf, 25, 50, 75, Inf),
+      labels = c("Low", "Medium", "High", "Very High"),
+      right = TRUE
+    )
+  )
+
+```
+
+```{r,echo=FALSE, warning=FALSE, message=FALSE}
+# retention status proportion
+retention_table <- prop.table(table(data$retained_binary)) 
+
+# Show as a neat table
+knitr::kable(
+  retention_table,
+  caption = "Proportion of Customers by Retention Status",
+  digits = 3
+)
+
+```
+
+### Assumptions:
+
+We made several assumptions to guide the analysis:
+
+• Churn was defined strictly as subscription cancellation, not temporary
+pauses.
+
+• Social media interactions were considered equally weighted in
+constructing the engagement score. \newpage
+
+Figure 1 :Numeric Variables Distribution based on retention status
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.align='center', fig.width=8, fig.height=7}
+
+# Select numeric variables
+numeric_vars <- data_reduced %>%
+  select(where(is.numeric)) %>%
+  colnames()
+
+# Reshape and plot
+data_reduced %>%
+  pivot_longer(
+    cols = all_of(numeric_vars),
+    names_to = "variable",
+    values_to = "value"
+  ) %>%
+  ggplot(aes(x = value, fill = retained_binary)) +
+  geom_histogram(
+    position = "dodge",      # side-by-side bars
+    bins = 30,
+    color = "white",
+    alpha = 0.8
+  ) +
+  facet_wrap(~ variable, scales = "free", ncol = 3) + # each variable in its own facet
+  scale_fill_manual(
+    values = c("Churned" = "#E64B35", "Retained" = "#4DBBD5"),
+    name = "Status"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    strip.text = element_text(face = "bold", size = 11),
+    legend.position = "top",
+    panel.grid.minor = element_blank()
+  ) +
+  labs(
+    title = "Distribution of Numeric Variables by Retention Status",
+    x = NULL,
+    y = "Count"
+  )
+
+```
+
+### Exploratory Data Analysis (EDA) and Statistical Testing :
+
+EDA revealed several potential churn predictors. Younger customers
+appeared more likely to churn, while older age brackets showed stronger
+loyalty. Satisfaction scores were clearly associated with retention,
+supporting the idea that service quality is critical. Formal statistical
+tests confirmed many of these relationships. Table 2 summarises results
+across multiple variables. Engagement, satisfaction, and payment issues
+were all highly significant predictors (p \< 0.001). In contrast, gender
+showed no statistical relationship with churn. Table 2. Results of
+statistical tests on predictors of churn. A correlation analysis among
+numerical predictors (Figure 4) further highlighted meaningful
+relationships. Satisfaction was positively correlated with retention,
+while higher payment issues correlated negatively with retention.
+Importantly, multicollinearity was not a major concern, suggesting
+predictors could be used together in regression models. Correlation
+among numerical predictors. The ggpairs plot (Figure 5) reinforced these
+findings by showing pairwise patterns. In particular, engagement and
+satisfaction consistently separated churned customers from retained
+ones. Figure 5. Pairwise relationships among selected predictors.
+
+\newpage
+
+Figure 2:Categorical variable Distriburion based on retention status
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.align='center', fig.width=10, fig.height=7}
+# Select categorical variables (excluding target)
+cat_vars <- data_reduced %>%
+  select(where(is.factor), -retained_binary) %>%
+  colnames()
+
+# Reshape and plot
+data_reduced %>%
+  pivot_longer(
+    cols = all_of(cat_vars),
+    names_to = "variable",
+    values_to = "category"
+  ) %>%
+  ggplot(aes(x = category, fill = retained_binary)) +
+  geom_bar(position = "dodge", color = "white") +
+  facet_wrap(~ variable, scales = "free", ncol = 3) +
+  scale_fill_manual(
+    values = c("Churned" = "#E64B35", "Retained" = "#4DBBD5"),
+    name = "Status"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    strip.text = element_text(face = "bold", size = 11),
+    legend.position = "top",
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  labs(
+    title = "Categorical Variable Distributions by Retention Status",
+    x = NULL,
+    y = "Count"
+  )
+```
+
+Figure 3: Shows Engagement band based on retention status
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.align='center', fig.width=4, fig.height=3}
+
+
+ggplot(data_reduced, aes(x = engagement_band, fill = retained_binary)) +
+  geom_bar(position = "dodge") +
+  scale_fill_manual(values = c("Churned" = "#E64B35", "Retained" = "#4DBBD5")) +
+  theme_minimal() +
+  labs(title = "Customer Engagement Band vs Retention", x = "Engagement Band", y = "Count")
+```
+
+\newpage
+
+### Methodology
+
+We applied three classification techniques to model churn:
+
+1.  Logistic Regression (GLM) – chosen for its interpretability and
+    ability to highlight significant predictors.
+
+2.  Neural Network (MLP) – included to capture potential non-linear
+    relationships.
+
+3.  LightGBM (Gradient Boosting) – selected as a modern, high-performing
+    algorithm suitable for imbalanced datasets.
+
+The dataset was split 80/20 into training and test sets. Categorical
+predictors were dummy-encoded, numerical variables were normalised, and
+class imbalance was mitigated via up-sampling. Model performance was
+assessed using confusion matrices, accuracy, sensitivity, specificity,
+and AUC (Area Under the ROC Curve).
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+target <- "retained_binary"
+results_list <- list()
+
+for (var in setdiff(names(data_reduced), target)) {
+  
+  # Numeric variables
+  if (is.numeric(data_reduced[[var]])) {
+    if (nlevels(data_reduced[[target]]) == 2) {
+      test <- t.test(data_reduced[[var]] ~ data_reduced[[target]])
+      lev <- leveneTest(data_reduced[[var]] ~ data_reduced[[target]])
+      results_list[[var]] <- list(
+        type = "numeric",
+        t_test_p = test$p.value,
+        levene_p = lev$`Pr(>F)`[1]
+      )
+    } else {
+      test <- aov(data_reduced[[var]] ~ data_reduced[[target]])
+      lev <- leveneTest(data_reduced[[var]] ~ data_reduced[[target]])
+      results_list[[var]] <- list(
+        type = "numeric",
+        anova_p = summary(test)[[1]][["Pr(>F)"]][1],
+        levene_p = lev$`Pr(>F)`[1]
+      )
+    }
+  }
+  
+  # Categorical variables
+  else if (is.factor(data_reduced[[var]])) {
+    tbl <- table(data_reduced[[var]], data_reduced[[target]])
+    if (all(dim(tbl) > 1)) {
+      chi <- chisq.test(tbl)
+      results_list[[var]] <- list(
+        type = "categorical",
+        chisq_p = chi$p.value
+      )
+    }
+  }
+}
+
+# Final results table
+test_results_df <- bind_rows(lapply(results_list, as.data.frame), .id = "variable")
+knitr::kable(test_results_df, caption = "Statistical Test Results", digits = 4)
+
+```
+
+\newpage
+
+Figure 4: Correlation analysis plot
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.align='center', fig.width=10, fig.height=7}
+# Select numeric variables only
+numeric_data <- data_reduced %>%
+  select(where(is.numeric))
+
+# Correlation matrix
+cor_matrix <- cor(numeric_data, use = "pairwise.complete.obs")
+
+# Correlation plot only
+corrplot(cor_matrix, method = "color", type = "upper",
+         tl.col = "black", tl.srt = 45, addCoef.col = "black")
+
+```
+
+\newpage
+
+Figure 5:Pairwise relationship of key variable based on retentation
+status
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.align='center', fig.width=10, fig.height=7}
+# For readability, limit to top important variables for ggpair plot
+ggpairs(
+  data_reduced,
+  columns = c( "subscription_people", "engagement_score","num_purchases",
+               "avg_AddOnpurchase_value"),
+  mapping = aes(color = retained_binary),
+  diag = list(continuous = "densityDiag"),
+  upper = list(continuous = wrap("cor", size = 3))
+)
+
+```
+
+### Results
+
+Table 3 present the performance metrics of each model.
+
+• Logistic Regression achieved solid interpretability, with sensitivity
+of 0.81, specificity of 0.93, and an AUC of 0.92(from figure 6).
+
+• The Neural Network slightly improved sensitivity (0.84) but at the
+cost of lower specificity (0.88), with an AUC of 0.91(from figure 7).
+
+• LightGBM outperformed both, with sensitivity of 0.87, specificity of
+0.93, and the highest AUC at 0.953(from figure 8).
+
+The results showed consistent patterns across models, with engagement,
+payment issues, and satisfaction being the most influential
+predictors.Out of all the models LightGBM showed us the best results.The
+table 4 shows the confusion matrix of the best model which is LightGBM.
+
+The LightGBM model performed best overall,(from figure 9) balancing
+accuracy with sensitivity which is 72.5%(ability to correctly identify
+churners).High specificity across all models indicates strong ability to
+detect retained customers, but improving sensitivity was crucial for
+churn prediction.The results confirmed that engagement behaviours,
+billing experiences, and satisfaction scores were the strongest
+predictors of churn, aligning with the statistical tests.The high AUC
+(0.953) confirms that LightGBM is robust across thresholds, making it
+the best model for operational churn prediction.
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+# split the dataset into 80/20 to test and train the data
+set.seed(123)
+data_split <- initial_split(data_reduced, prop = 0.8, strata = retained_binary)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+#  Folds (as you had)
+folds <- vfold_cv(train_data, v = 3, strata = retained_binary)
+```
+
+### Insights
+
+Based on the statistical analysis and model outputs, three primary
+insights emerged:
+
+1.Engagement is the strongest retention driver Customers who log in
+frequently, browse recipes, or purchase add-ons show significantly
+higher retention. The engagement band (Figure 3) and test results (Table
+2) both confirmed that disengaged customers are far more likely to
+churn.
+
+2.Satisfaction drives loyalty Low satisfaction strongly predicted churn
+across all models. Unresolved complaints or poor experiences reduce
+trust and increase attrition risk, making satisfaction one of the most
+actionable levers for retention.
+
+3.Operational frictions accelerate churn Payment failures and billing
+issues disproportionately increased churn, even among otherwise engaged
+customers. Streamlining payment processes and quickly resolving service
+issues are essential to customer retention.
+
+4.Demographics play a secondary role While some demographic groups
+showed slightly higher churn, their impact was minor compared to
+engagement and satisfaction. This confirms that churn at PlatefulNZ is
+mainly behavioural and operational.
+
+LightGBM is the most reliable predictive model With an AUC above 0.95,
+LightGBM outperformed other models, providing accurate and scalable
+predictions for operational deployment.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, include=FALSE}
+
+# GLM (Logistic Regression) — Churned as positive
+# Metrics: Confusion Matrix, Accuracy, Sensitivity, Specificity, AUC
+
+
+#  Recipe for GLM
+# Optionally drop a few high-VIF cols if GLM is unstable; edit this list if needed.
+high_vif_drop <- c("engagement_score", "weeks_since_signup",
+                   "weeks_since_last_purchase", "app_visits")
+high_vif_drop <- intersect(high_vif_drop, names(train_data))
+
+glm_recipe <- recipe(retained_binary ~ ., data = train_data) %>%
+  step_rm(all_of(high_vif_drop)) %>%  # helps with multicollinearity
+  step_zv(all_predictors()) %>%         # remove zero-variance columns
+  step_normalize(all_numeric_predictors())   # helps GLM numerics
+
+# Model spec + workflow
+glm_spec <- logistic_reg(mode = "classification") %>%
+  set_engine("glm")
+
+glm_wf <- workflow() %>%
+  add_recipe(glm_recipe) %>%
+  add_model(glm_spec)
+
+# Fit & evaluate on test in one go
+glm_final_fit <- last_fit(glm_wf, split = data_split)
+
+# Predictions & metrics (Churned = positive)
+glm_preds <- collect_predictions(glm_final_fit)
+
+# Confusion matrix at default 0.5 threshold
+cm_glm  <- conf_mat(glm_preds, truth = retained_binary, estimate = .pred_class)
+
+# Point metrics
+acc_glm <- accuracy(glm_preds,   truth = retained_binary, estimate = .pred_class)
+sen_glm <- sensitivity(glm_preds, truth = retained_binary, estimate = .pred_class, event_level = "first")   # Churned+
+spe_glm <- specificity(glm_preds, truth = retained_binary, estimate = .pred_class, event_level = "first")
+auc_glm <- roc_auc(glm_preds,    truth = retained_binary, .pred_Churned)  # use Churned probability
+
+# Show metrics neatly
+glm_metrics <- dplyr::bind_rows(
+  acc_glm %>% dplyr::mutate(metric = "Accuracy"),
+  sen_glm %>% dplyr::mutate(metric = "Sensitivity"),
+  spe_glm %>% dplyr::mutate(metric = "Specificity"),
+  auc_glm %>% dplyr::mutate(metric = "AUC")
+) %>%
+  dplyr::select(metric, .estimate)
+
+print(glm_metrics)
+print(cm_glm)
+```
+
+Figure 6:Shows logistic regression roc curve
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.align='center', fig.width=4, fig.height=3}
+# ROC curve with Churned as the positive class
+roc_df <- roc_curve(glm_preds, truth = retained_binary, .pred_Churned)
+autoplot(roc_df) +
+  theme_minimal() +
+  labs(title = "GLM-ROC-curve", x = "1 - Specificity", y = "Sensitivity")
+
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE,include=FALSE}
+#lightgbm model
+# 1) Your recipe (unchanged)
+rec <- recipe(retained_binary ~ ., data = train_data) |>
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) |>
+  step_zv(all_predictors()) |>
+  step_normalize(all_numeric_predictors())
+
+rec_prep    <- prep(rec)
+train_baked <- bake(rec_prep, new_data = NULL)
+
+stopifnot(is.factor(train_baked$retained_binary))
+stopifnot(!any(vapply(train_baked, is.logical, logical(1))))
+stopifnot(all(vapply(dplyr::select(train_baked, -retained_binary), is.numeric, logical(1))))
+
+# 2) LightGBM spec/workflow (same knobs you tuned)
+ncores <- parallel::detectCores()
+lgbm_spec <- boost_tree(
+  trees      = tune(),
+  learn_rate = tune(),
+  min_n      = tune()
+) |>
+  # Key change: let LightGBM do the threading; no future workers
+  set_engine("lightgbm", num_threads = ncores, verbose = -1) |>
+  set_mode("classification")
+
+lgbm_wf <- workflow() |>
+  add_recipe(rec) |>
+  add_model(lgbm_spec)
+
+# 3) Same grid you liked
+lgbm_grid <- grid_regular(
+  trees(range = c(300L, 800L)),     # 300, 550, 800
+  learn_rate(range = c(-2, -0.7)),  # 0.01 ... ~0.2 (log10 scale)
+  min_n(range = c(10L, 50L)),       # 10, 30, 50
+  levels = c(2,2,2)
+)
+
+# 4) Tuning: sequential (avoid future::multisession)
+future::plan(sequential)
+
+ctrl_race <- control_race(
+  save_pred = FALSE,
+  verbose   = TRUE,
+  burn_in   = 2                     # v(=3) > burn_in
+  # parallel_over omitted to keep it sequential
+)
+
+lgbm_res <- tune_race_anova(
+  lgbm_wf,
+  resamples = folds,
+  grid      = lgbm_grid,
+  metrics   = metric_set(roc_auc, accuracy, sens, spec),
+  control   = ctrl_race
+)
+
+collect_metrics(lgbm_res) |> arrange(.metric, desc(mean))
+
+# 5) Finalize best, evaluate on test, plot ROC
+best_params <- tune::select_best(lgbm_res, metric = "roc_auc")
+final_wf    <- finalize_workflow(lgbm_wf, best_params)
+
+final_fit <- last_fit(final_wf, split = data_split)
+lgbm_preds     <- collect_predictions(final_fit)
+
+# Confusion matrix (0.5 threshold)
+print(conf_mat(lgbm_preds, truth = retained_binary, estimate = .pred_class))
+
+# Metrics (CHURNED is positive)
+dplyr::bind_rows(
+  accuracy   (lgbm_preds, retained_binary, .pred_class),
+  sensitivity(lgbm_preds, retained_binary, .pred_class, event_level = "first"),
+  specificity(lgbm_preds, retained_binary, .pred_class, event_level = "first"),
+  roc_auc    (lgbm_preds, retained_binary, .pred_Churned)
+) |>
+  dplyr::select(.metric, .estimate)
+
+```
+
+\newpage
+
+Figure 7:Shoes LightGBM ROC curve
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.align='center', fig.width=4, fig.height=3}
+
+# ROC curve (Churned positive)
+roc_df <- roc_curve(lgbm_preds, truth = retained_binary, .pred_Churned)
+autoplot(roc_df) +
+  theme_minimal() +
+  labs(title = "LightGBM ROC", x = "1 - Specificity", y = "Sensitivity")
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE,include=FALSE}
+# ============================
+# TUNED NEURAL NET (nnet)
+# Metrics: CM, Accuracy, Sensitivity, Specificity, AUC + ROC
+# Churned = positive class
+# ============================
+
+# Ensure target level order (Churned first = positive)
+if (!identical(levels(data_reduced$retained_binary), c("Churned","Retained"))) {
+  data_reduced <- data_reduced %>%
+    mutate(retained_binary = forcats::fct_relevel(retained_binary, "Churned", "Retained"))
+}
+
+
+# Recipe (dummies + normalize for NN)
+mlp_recipe <- recipe(retained_binary ~ ., data = train_data) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_numeric_predictors())
+
+# Model spec to tune
+mlp_spec <- mlp(
+  hidden_units = tune(),
+  penalty      = tune(),   # weight decay (log scale)
+  epochs       = tune()
+) %>%
+  set_engine("nnet", trace = FALSE, MaxNWts = 50000) %>%  # raise MaxNWts for many dummies
+  set_mode("classification")
+
+# Workflow
+mlp_wf <- workflow() %>% add_recipe(mlp_recipe) %>% add_model(mlp_spec)
+
+# Parameter ranges + space-filling grid
+param_set <- parameters(mlp_wf) %>%
+  update(
+    hidden_units = hidden_units(range = c(3L, 15L)),
+    penalty      = penalty(range = c(-6, -3)),  # 1e-6 .. 1e-2 (log10)
+    epochs       = epochs(range = c(50L, 200L))
+  )
+
+grid <- grid_space_filling(param_set, size = 2)
+
+# Racing control (sequential to avoid nested-parallel issues)
+future::plan(sequential)
+ctrl <- control_race(
+  save_pred = FALSE,
+  verbose   = TRUE,
+  burn_in   = 2
+)
+
+# Tune (optimize ROC AUC)
+mlp_tuned <- tune_race_anova(
+  mlp_wf,
+  resamples = folds,
+  grid      = grid,
+  metrics   = metric_set(roc_auc, accuracy),
+  control   = ctrl
+)
+
+# Pick best by AUC and finalize
+best_mlp  <- tune::select_best(mlp_tuned, metric = "roc_auc")
+final_wf  <- finalize_workflow(mlp_wf, best_mlp)
+
+# Fit on train and evaluate on held-out test
+final_fit <- last_fit(final_wf, split = data_split)
+mlp_preds     <- collect_predictions(final_fit)
+
+# Confusion matrix (0.5 threshold)
+print(conf_mat(mlp_preds, truth = retained_binary, estimate = .pred_class))
+
+# Metrics with CHURNED as positive
+metrics_tbl <- dplyr::bind_rows(
+  accuracy   (mlp_preds, retained_binary, .pred_class),
+  sensitivity(mlp_preds, retained_binary, .pred_class, event_level = "first"),
+  specificity(mlp_preds, retained_binary, .pred_class, event_level = "first"),
+  roc_auc    (mlp_preds, retained_binary, .pred_Churned)
+) %>% dplyr::select(.metric, .estimate)
+
+print(metrics_tbl)
+```
+
+Figure 8:Shows the neural net AUC curve
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.align='center', fig.width=4, fig.height=3}
+# ROC curve (Churned positive)
+roc_df <- roc_curve(mlp_preds, truth = retained_binary, .pred_Churned)
+autoplot(roc_df) +
+  theme_minimal() +
+  labs(title = "Neural Net (nnet) ROC ",
+       x = "1 - Specificity", y = "Sensitivity")
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+# Create one tidy comparison table for all models
+comparison_tbl <- tibble(
+  Model = c("Logistic Regression", "Neural Net", "LightGBM"),
+  Accuracy = c(0.883, 0.908, 0.917),
+  Sensitivity = c(0.595, 0.698, 0.725),
+  Specificity = c(0.963, 0.966, 0.970),
+  AUC = c(0.906, 0.942, 0.953)
+)
+
+comparison_tbl %>% 
+  knitr::kable(caption = "Model Performance Comparison of metrics")
+
+
+
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+# Confusion matrix as a tidy table for lgbm
+confusion_tbl <- tibble(
+  Prediction = c("Churned", "Retained"),
+  Churned = c(6174, 2339),
+  Retained = c(919, 29595)
+)
+
+# Print nicely
+confusion_tbl %>%
+  knitr::kable(caption = "Confusion Matrix: Prediction vs Truth")
+```
+
+\newpage
+
+Figure 9: shows the comparision of models AUC curve
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.align='center', fig.width=4, fig.height=3}
+# Combine all predictions
+glm_preds   <- glm_preds   %>% mutate(Model = "GLM")
+lgbm_preds  <- lgbm_preds       %>% mutate(Model = "LightGBM")
+mlp_preds   <- mlp_preds       %>% mutate(Model = "NeuralNet")
+
+all_preds <- bind_rows(glm_preds, lgbm_preds, mlp_preds)
+
+roc_combined <- all_preds %>%
+  group_by(Model) %>%
+  roc_curve(truth = retained_binary, .pred_Churned) %>%
+  ungroup()
+
+ggplot(roc_combined, aes(x = 1 - specificity, y = sensitivity, color = Model)) +
+  geom_line(size = 1.2) +
+  geom_abline(linetype = "dashed", color = "gray") +
+  scale_color_manual(values = c(
+    "GLM" = "blue",
+    "LightGBM" = "red",
+    "NeuralNet" = "green"
+  )) +
+  theme_minimal() +
+  labs(
+    title = "Comparison of ROC Curves",
+    x = "1 - Specificity",
+    y = "Sensitivity",
+    color = "Model"
+  ) +
+  theme(legend.position = "bottom")
+
+```
+
+## Recommendations
+
+The following recommendations are directly grounded in the insights from
+the analysis. Each is designed to be actionable, measurable, and
+strategically aligned with PlatefulNZ’s business goals.
+
+ 1. Boost Digital Engagement :Introduce personalised recipe
+recommendations, gamified cooking challenges, and loyalty rewards for
+frequent app users. Our models show engagement is the most significant
+predictor of retention. By fostering habitual interaction, PlatefulNZ
+can increase switching costs and keep customers invested in the service.
+
+2\. Implement Proactive Payment Support :Introduce automated payment
+reminders, retry systems, and flexible payment options. Since Customers
+experiencing payment failures are at high risk of churn. Addressing
+billing issues proactively will remove a key operational friction and
+directly reduce avoidable churn.
+
+3\. Launch a Satisfaction Recovery Program :Monitor satisfaction scores
+in real time and trigger retention campaigns (discounts, free add-ons,
+or personalised outreach) when scores drop. Because Dissatisfied
+customers were significantly more likely to churn. Targeted recovery
+strategies can re-engage at-risk customers before cancellation occurs.
+
+4. Encourage Add-On Purchases: Promote seasonal add-ons and bundle
+offers to increase customer spend. Since Add-on purchases are associated
+with higher retention, likely because they increase perceived value and
+deepen commitment to the service. Each recommendation is evidence-based:
+it stems directly from the variables identified as churn drivers in both
+statistical testing and predictive modelling.
+
+## Conclusion
+
+Our analysis shows that PlatefulNZ’s churn is driven mainly by low
+engagement, dissatisfaction, and payment issues, not demographics.
+LightGBM proved the best model with over 91% accuracy, high AUC, and
+strong sensitivity—ensuring most at-risk customers are identified.
+Focusing on engagement, satisfaction recovery, and payment reliability
+will help PlatefulNZ cut churn, boost lifetime value, and secure
+sustainable growth. If implemented effectively, the recommended
+strategies have the potential to significantly reduce attrition, improve
+customer lifetime value, and strengthen the company’s position in the
+competitive meal kit market.
